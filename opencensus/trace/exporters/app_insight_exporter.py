@@ -65,9 +65,29 @@ class AppInsightExporter(base.Exporter):
                 "baseData": {
                     "id": "",
                     "duration": "",
-                    "responseCode": "200",
-                    "success": "true",
+                    "responseCode": "", #200
+                    "success": "", #true
                     "name": "",
+                }
+            }
+        }
+        self.base_dependency_json = {
+            "iKey": self.instrumentation_key,
+            "time": None,
+            "name": "RemoteDependencyData",
+            "tags": {
+                "ai.operation.id": "",
+                "ai.operation.parentId": ""
+            },
+            "data": {
+                "baseType": "RemoteDependencyData",
+                "baseData": {
+                    "id": "",
+                    "duration": "",
+                    "resultCode": "",  # 200
+                    "success": "",  # true
+                    "name": "",
+                    "data":"" #request url with all query params
                 }
             }
         }
@@ -79,14 +99,23 @@ class AppInsightExporter(base.Exporter):
         :param list of opencensus.trace.span_data.SpanData span_datas:
             SpanData tuples to emit
         """
-        
+        # TODO, length check
         top_span = span_datas[0]
         trace_id = top_span.context.trace_id if top_span.context is not None \
         else ""
-        self.base_req_json["tags"]["ai.operation.id"] = trace_id
-        lis = self.convertToAppInsightFormat(span_datas)
-        for item in lis:
-            self.sendData(item)
+        is_request = top_span.attributes.get("/http/method")
+        if (is_request):
+            # Request Data
+            self.base_req_json["tags"]["ai.operation.id"] = trace_id
+            lis = self.convertToAppInsightFormat(span_datas)
+            for item in lis:
+                self.sendData(item)
+        else:
+            self.base_dependency_json["tags"]["ai.operation.id"] = trace_id
+
+
+    def converToDepedencyFormat(self):
+        return 0
 
     def convertToAppInsightFormat(self,span_datas):
         lis = [self.transform(span) for span in span_datas]
