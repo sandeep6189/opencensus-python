@@ -30,7 +30,7 @@ class Envelope(object):
     _ikey = ""
     _time = ""
     _name = ""
-    _tags = {}
+    _tags = None
     _data = None
 
     def __init__(self,ikey):
@@ -47,6 +47,15 @@ class Envelope(object):
     
     def SetEnvelopeData(self,data):
         self._data = data
+    
+    def toJson(self):
+        return {
+            "ikey": self._ikey,
+            "time": self._time,
+            "name": self._name,
+            "tags": self._tags.toJson(),
+            "data": self._data.toJson()
+        }
 
 class Data(object):
     _baseType = ""
@@ -61,7 +70,7 @@ class Domain(object):
 class RequestData(Domain):
 
     _duration = ""
-    _success = ""
+    _success = False
     _name = "RequestData"
     _response_code = ""
 
@@ -71,19 +80,22 @@ class RequestData(Domain):
         self._success = success
         self._response_code = status_code
     
-    def to_json(self):
+    def toJson(self):
         return {
-            "id": self._id,
-            "duration": self._duration,
-            "success": self._success,
-            "name": self._name,
-            "responseCode": self._response_code
+            "baseType": self._name,
+            "baseData": {
+                "id": self._id,
+                "duration": self._duration,
+                "success": self._success,
+                "name": self._name,
+                "responseCode": self._response_code
+            }
         }
 
 class RemoteDependencyData(Domain):
 
     _duration = ""
-    _success = ""
+    _success = False
     _name = "RemoteDependencyData"
     _result_code = ""
 
@@ -93,13 +105,16 @@ class RemoteDependencyData(Domain):
         self._success = success
         self._result_code = status_code
 
-    def to_json(self):
+    def toJson(self):
         return {
-            "id": self._id,
-            "duration": self._duration,
-            "success": self._success,
-            "name": self._name,
-            "resutltCode": self._result_code 
+            "baseType": self._name,
+            "baseData":{
+                "id": self._id,
+                "duration": self._duration,
+                "success": self._success,
+                "name": self._name,
+                "resutltCode": self._result_code
+            } 
         }
 
 class AppInsightExporter(base.Exporter):
@@ -146,66 +161,63 @@ class AppInsightExporter(base.Exporter):
         self._envelope = Envelope(self.instrumentation_key)
 
         is_request = top_span.attributes.get("/http/method")
-        if (is_request):
-            # Request Data
-            self._envelope.SetEnvelopeName("RequestData")
-            #self.base_req_json['data']['baseType'] = "RequestData"
-            lis = self.convertToAppInsightFormat(span_datas)
-        else:
-            #self.base_req_json['name'] = "RemoteDependencyData"
-            #self.base_req_json['data']['baseType'] = "RemoteDependencyData"
-            lis = self.convertToAppInsightFormat(span_datas,"RemoteDependencyData")
+       
+        lis = self.convertToAppInsightFormat(span_datas)
         
         for item in lis:
                 self.sendData(item)
 
-    def convertToAppInsightFormat(self,span_datas,bond_type="RequestData"):
+    def convertToAppInsightFormat(self,span_datas):
         converted_jsons = []
         for span_data in span_datas:
-            req = copy.deepcopy(self._envelope)
+            cur_req = copy.deepcopy(self._envelope)
 
             # set envelope time
-            req.SetEnvelopeTime(span_data.start_time)
+            cur_req.SetEnvelopeTime(span_data.start_time)
 
             # data values
+            
+            #id
             _id = span_data.span_id
-            
-            data = RequestData()
-            data['id'] = span_data.span_id
-            
 
-            st_dt_obj = datetime.strptime(span_data.start_time,"%Y-%m-%dT%H:%M:%S.%fZ")
-            end_dt_obj = datetime.strptime(span_data.end_time,"%Y-%m-%dT%H:%M:%S.%fz")
-            
-            diff = end_dt_obj - st_dt_obj
-            
-            # TODO: fix this
-            duration_str = str(int(diff.total_seconds() * 1000))[:6]
+            # duration
+            _duration = self.getDuration(span_data)
 
-            data['duration'] = duration_str # TODO
-            data['name'] = span_data.name
+            # success
+            # status code
 
+            if (self.isRequestData(span_data)):
+                data = RequestData(span_data.span_id,
+                    _duration,
+                    True,
+                    self.getStatusCode("RequestData")
+                )
+                cur_req.SetEnvelopeData(data)
+            else:
+                data = RemoteDependencyData(span_data.span_id,
+                    _duration,
+                    True,
+                    self.getStatusCode("RemoteDependencyData")
+                )
+                cur_req.SetEnvelopeData(data)
+            
+            #
+            """
             if span_data.parent_span_id is not None:
                 req["tags"]["ai.operation.parentId"] = str(span_data.parent_span_id)
         
             if bond_type == "RequestData" and span_data.status is not None:
                 data['responseCode'] = span_data.status.format_status_json()['code']
+            """
+            converted_jsons.insert({"request":cur_req.toJson(),"context:":{}})
 
-
-
-            converted_jsons.insert({"request":req,"context:":{}})
-
-        
-
-
-        return lis
+        return converted_jsons
 
     def transform(self,span_data):
         """
         Convert span_data to request json
         """
         
-
     def sendData(self,request):
         """
         :type request: dictionary
@@ -231,6 +243,20 @@ class AppInsightExporter(base.Exporter):
             body=encoded_data,
             headers={'Content-Type': 'application/json'}
         )
+    
+    def isRequestData(self,span_data):
+        if span_data.attributes.get("/http/method"):
+            return True
+        return False
+
+    def getStatusCode(self,span_data):
+        return ""
+    
+    def getDuration(self,span_data):
+        st_dt_obj = datetime.strptime(span_data.start_time,"%Y-%m-%dT%H:%M:%S.%fZ")
+        end_dt_obj = datetime.strptime(span_data.end_time,"%Y-%m-%dT%H:%M:%S.%fz")
+        diff = end_dt_obj - st_dt_obj
+        return str(int(diff.total_seconds() * 1000))[:6]
 
     def export(self, span_datas):
         """
