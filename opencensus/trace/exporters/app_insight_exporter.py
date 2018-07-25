@@ -52,7 +52,7 @@ class Envelope(object):
     
     def toJson(self):
         return {
-            "ikey": self._ikey,
+            "iKey": self._ikey,
             "time": self._time,
             "name": self._name,
             "tags": self._tags.toJson(),
@@ -92,12 +92,13 @@ class RequestData(Domain):
     _name = "RequestData"
     _response_code = ""
 
-    def __init__(self,id, duration, success, status_code):
+    def __init__(self,id, duration, status_code):
         super().__init__(id)
         self._duration = duration
-        self._success = success
         self._response_code = status_code
-    
+        self._success = int(status_code)<400 if status_code is not "" \
+        else "False"
+
     def toJson(self):
         return {
             "baseType": self._name,
@@ -116,12 +117,19 @@ class RemoteDependencyData(Domain):
     _success = False
     _name = "RemoteDependencyData"
     _result_code = ""
+    _data = ""
+    _target = ""
+    _type = ""
 
-    def __init__(self,id, duration, success, status_code):
+    def __init__(self,id, duration, status_code, data, type):
         super().__init__(id)
         self._duration = duration
-        self._success = success
+        self._data = data
+        self._target = data
+        self._type = type
         self._result_code = status_code
+        self._success = int(status_code) < 400 if status_code is not "" \
+        else "False"
 
     def toJson(self):
         return {
@@ -131,7 +139,10 @@ class RemoteDependencyData(Domain):
                 "duration": self._duration,
                 "success": self._success,
                 "name": self._name,
-                "resutltCode": self._result_code
+                "resultCode": self._result_code,
+                "data": self._data,
+                "target": self._target,
+                "type": self._type
             } 
         }
 
@@ -178,7 +189,9 @@ class AppInsightExporter(base.Exporter):
 
     def convertToAppInsightFormat(self,span_datas):
         converted_jsons = []
+        i = 0
         for span_data in span_datas:
+
             cur_req = copy.deepcopy(self._envelope)
             # time
             cur_req.SetEnvelopeTime(span_data.start_time)
@@ -186,19 +199,17 @@ class AppInsightExporter(base.Exporter):
             # tags
             trace_id = span_data.context.trace_id if span_data.context is not None \
             else ""
-            parent_id = span_data.context.parent_span_id if span_data.context is not None \
-            else ""
+            parent_id = span_data.parent_span_id
             cur_req.SetEnvelopeTags(str(parent_id), str(trace_id))
 
             # data values
             _id = span_data.span_id
             _duration = self.getDuration(span_data)
-            
+
             _type = self.getType(span_data)
             if (_type == "RequestData"):
                 data = RequestData(span_data.span_id,
                     _duration,
-                    True,
                     self.getStatusCode(span_data,_type)
                 )
                 cur_req.SetEnvelopeName(_type)
@@ -206,38 +217,54 @@ class AppInsightExporter(base.Exporter):
             else:
                 data = RemoteDependencyData(span_data.span_id,
                     _duration,
-                    True,
-                    self.getStatusCode(span_data,_type)
+                    self.getStatusCode(span_data,_type),
+                    self.getTargetData(span_data),
+                    self.getDependencyType(span_data)
                 )
                 cur_req.SetEnvelopeName(_type)
                 cur_req.SetEnvelopeData(data)
             
-            converted_jsons.insert(cur_req.toJson())
+            converted_jsons.append( cur_req.toJson())
+            i += 1
+
         return converted_jsons
         
     def sendToEndpoint(self,data):
-        encoded_data = json.dumps(data).encode('utf-8')
+
+        encoded_data = json.dumps(data)
         r = self.http.request('POST',
             self.endpoint,
             body=encoded_data,
             headers={'Content-Type': 'application/json'}
         )
-    
+
     def getType(self,span_data):
         if span_data.attributes.get("/http/method"):
             return "RequestData"
         return "RemoteDependencyData"
 
     def getStatusCode(self,span_data,bond_type):
-        if bond_type == "RequestData" and span_data.status is not None:
+        if bond_type == "RequestData" and span_data.attributes is not None:
             return  span_data.attributes.get('/http/status_code', "")
         return span_data.attributes.get('requests/status_code', "")
-    
+
+    def getTargetData(self, span_data):
+        if span_data.attributes is not None:
+            return span_data.attributes.get('requests/url',"")
+        return ""
+
+    def getDependencyType(self, span_data):
+        if span_data.name is not None:
+            return span_data.name
+        return ""
+
     def getDuration(self,span_data):
         st_dt_obj = datetime.strptime(span_data.start_time,"%Y-%m-%dT%H:%M:%S.%fZ")
         end_dt_obj = datetime.strptime(span_data.end_time,"%Y-%m-%dT%H:%M:%S.%fz")
         diff = end_dt_obj - st_dt_obj
-        return str(int(diff.total_seconds() * 1000))[:6]
+        # sending duration in microseconds because AI expects that
+        # AI will convert this to miliseonds before population its database
+        return str(int(diff.total_seconds() * 1000000))[:6]
 
     def export(self, span_datas):
         """
