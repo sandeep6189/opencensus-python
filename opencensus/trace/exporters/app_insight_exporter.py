@@ -30,7 +30,7 @@ class Envelope(object):
     _ikey = ""
     _time = ""
     _name = ""
-    _tags = {}
+    _tags = None
     _data = None
 
     def __init__(self,ikey):
@@ -42,11 +42,29 @@ class Envelope(object):
     def SetEnvelopeTime(self,time):
         self._time = time
     
-    def SetEnvelopeTags(self,tags):
-        self._tags = tags
-    
+    def SetEnvelopeTags(self,parentId,traceId):
+        self._tags = EnvelopeTags()
+        self._tags.SetTagsParentid(parentId)
+        self._tags.SetTagsTraceId(traceId)
+
     def SetEnvelopeData(self,data):
         self._data = data
+
+class EnvelopeTags(object):
+    _parentId = ""
+    _traceId = ""
+
+    def SetTagsParentid(self,parentId):
+        self._parentId = parentId
+
+    def SetTagsTraceId(self, traceId):
+        self._traceId = traceId
+
+    def toJson(self):
+        return {
+            "ai.operation.id": self._traceId,
+            "ai.operation.parentId": self._parentId
+        }
 
 class Data(object):
     _baseType = ""
@@ -137,23 +155,22 @@ class AppInsightExporter(base.Exporter):
         :param list of opencensus.trace.span_data.SpanData span_datas:
             SpanData tuples to emit
         """
+
+        self._envelope = Envelope(self.instrumentation_key)
+
         # TODO, length check
         top_span = span_datas[0]
         trace_id = top_span.context.trace_id if top_span.context is not None \
         else ""
 
         #self.base_req_json["tags"]["ai.operation.id"] = trace_id
-        self._envelope = Envelope(self.instrumentation_key)
 
-        is_request = top_span.attributes.get("/http/method")
+        is_request = top_span.attributes.get("/http/method","")
         if (is_request):
             # Request Data
             self._envelope.SetEnvelopeName("RequestData")
-            #self.base_req_json['data']['baseType'] = "RequestData"
             lis = self.convertToAppInsightFormat(span_datas)
         else:
-            #self.base_req_json['name'] = "RemoteDependencyData"
-            #self.base_req_json['data']['baseType'] = "RemoteDependencyData"
             lis = self.convertToAppInsightFormat(span_datas,"RemoteDependencyData")
         
         for item in lis:
@@ -169,36 +186,33 @@ class AppInsightExporter(base.Exporter):
 
             # data values
             _id = span_data.span_id
-            
-            data = RequestData()
-            data['id'] = span_data.span_id
-            
 
+            trace_id = span_data.context.trace_id if span_data.context is not None \
+            else ""
+            parent_id = span_data.context.parent_span_id if span_data.context is not None \
+            else ""
+
+            req.SetEnvelopeTags(str(parent_id), str(trace_id))
+
+            if bond_type == "RequestData" and span_data.status is not None:
+                data = RequestData()
+                data['responseCode'] = span_data.attributes.get('/http/status_code', "")
+            else:
+                data = RemoteDependencyData()
+                data['resultCode'] = span_data.attributes.get('requests/status_code', "")
+
+            data['id'] = span_data.span_id
+
+            # TODO: fix this
             st_dt_obj = datetime.strptime(span_data.start_time,"%Y-%m-%dT%H:%M:%S.%fZ")
             end_dt_obj = datetime.strptime(span_data.end_time,"%Y-%m-%dT%H:%M:%S.%fz")
-            
             diff = end_dt_obj - st_dt_obj
-            
-            # TODO: fix this
             duration_str = str(int(diff.total_seconds() * 1000))[:6]
 
             data['duration'] = duration_str # TODO
             data['name'] = span_data.name
-
-            if span_data.parent_span_id is not None:
-                req["tags"]["ai.operation.parentId"] = str(span_data.parent_span_id)
-        
-            if bond_type == "RequestData" and span_data.status is not None:
-                data['responseCode'] = span_data.status.format_status_json()['code']
-
-
-
             converted_jsons.insert({"request":req,"context:":{}})
-
-        
-
-
-        return lis
+        return converted_jsons
 
     def transform(self,span_data):
         """
