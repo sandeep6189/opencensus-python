@@ -42,9 +42,11 @@ class Envelope(object):
     def SetEnvelopeTime(self,time):
         self._time = time
     
-    def SetEnvelopeTags(self,tags):
-        self._tags = tags
-    
+    def SetEnvelopeTags(self,parentId,traceId):
+        self._tags = EnvelopeTags()
+        self._tags.SetTagsParentid(parentId)
+        self._tags.SetTagsTraceId(traceId)
+
     def SetEnvelopeData(self,data):
         self._data = data
     
@@ -55,6 +57,22 @@ class Envelope(object):
             "name": self._name,
             "tags": self._tags.toJson(),
             "data": self._data.toJson()
+        }
+
+class EnvelopeTags(object):
+    _parentId = ""
+    _traceId = ""
+
+    def SetTagsParentid(self,parentId):
+        self._parentId = parentId
+
+    def SetTagsTraceId(self, traceId):
+        self._traceId = traceId
+
+    def toJson(self):
+        return {
+            "ai.operation.id": self._traceId,
+            "ai.operation.parentId": self._parentId
         }
 
 class Data(object):
@@ -152,90 +170,51 @@ class AppInsightExporter(base.Exporter):
         :param list of opencensus.trace.span_data.SpanData span_datas:
             SpanData tuples to emit
         """
-        # TODO, length check
-        top_span = span_datas[0]
-        trace_id = top_span.context.trace_id if top_span.context is not None \
-        else ""
-
-        #self.base_req_json["tags"]["ai.operation.id"] = trace_id
         self._envelope = Envelope(self.instrumentation_key)
-
-        is_request = top_span.attributes.get("/http/method")
-       
         lis = self.convertToAppInsightFormat(span_datas)
         
         for item in lis:
-                self.sendData(item)
+            self.sendToEndpoint(item)
 
     def convertToAppInsightFormat(self,span_datas):
         converted_jsons = []
         for span_data in span_datas:
             cur_req = copy.deepcopy(self._envelope)
-
-            # set envelope time
+            # time
             cur_req.SetEnvelopeTime(span_data.start_time)
 
+            # tags
+            trace_id = span_data.context.trace_id if span_data.context is not None \
+            else ""
+            parent_id = span_data.context.parent_span_id if span_data.context is not None \
+            else ""
+            cur_req.SetEnvelopeTags(str(parent_id), str(trace_id))
+
             # data values
-            
-            #id
             _id = span_data.span_id
-
-            # duration
             _duration = self.getDuration(span_data)
-
-            # success
-            # status code
-
-            if (self.isRequestData(span_data)):
+            
+            _type = self.getType(span_data)
+            if (_type == "RequestData"):
                 data = RequestData(span_data.span_id,
                     _duration,
                     True,
-                    self.getStatusCode("RequestData")
+                    self.getStatusCode(span_data,_type)
                 )
+                cur_req.SetEnvelopeName(_type)
                 cur_req.SetEnvelopeData(data)
             else:
                 data = RemoteDependencyData(span_data.span_id,
                     _duration,
                     True,
-                    self.getStatusCode("RemoteDependencyData")
+                    self.getStatusCode(span_data,_type)
                 )
+                cur_req.SetEnvelopeName(_type)
                 cur_req.SetEnvelopeData(data)
             
-            #
-            """
-            if span_data.parent_span_id is not None:
-                req["tags"]["ai.operation.parentId"] = str(span_data.parent_span_id)
-        
-            if bond_type == "RequestData" and span_data.status is not None:
-                data['responseCode'] = span_data.status.format_status_json()['code']
-            """
-            converted_jsons.insert({"request":cur_req.toJson(),"context:":{}})
-
+            converted_jsons.insert(cur_req.toJson())
         return converted_jsons
-
-    def transform(self,span_data):
-        """
-        Convert span_data to request json
-        """
         
-    def sendData(self,request):
-        """
-        :type request: dictionary
-        :param request: Transformed Dictionary
-        {
-            'request':{
-
-            }
-            'context':{
-
-            }
-        }
-        """
-        app_insight_req = request.get('request')
-        app_insight_ctx = request.get('context')
-        self.sendToEndpoint(app_insight_req)
-        #self.sendToEndpoint(app_insight_ctx)
-
     def sendToEndpoint(self,data):
         encoded_data = json.dumps(data).encode('utf-8')
         r = self.http.request('POST',
@@ -244,13 +223,15 @@ class AppInsightExporter(base.Exporter):
             headers={'Content-Type': 'application/json'}
         )
     
-    def isRequestData(self,span_data):
+    def getType(self,span_data):
         if span_data.attributes.get("/http/method"):
-            return True
-        return False
+            return "RequestData"
+        return "RemoteDependencyData"
 
-    def getStatusCode(self,span_data):
-        return ""
+    def getStatusCode(self,span_data,bond_type):
+        if bond_type == "RequestData" and span_data.status is not None:
+            return  span_data.attributes.get('/http/status_code', "")
+        return span_data.attributes.get('requests/status_code', "")
     
     def getDuration(self,span_data):
         st_dt_obj = datetime.strptime(span_data.start_time,"%Y-%m-%dT%H:%M:%S.%fZ")
